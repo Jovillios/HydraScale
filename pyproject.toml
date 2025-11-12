@@ -5,3 +5,6 @@ description = "A distributed training framework for benchmarking the trade-offs 
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
+
+[tool.ruff]
+line-length = 200
