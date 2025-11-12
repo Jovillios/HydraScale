@@ -8,7 +8,10 @@ import torch.optim as optim
 
 def main():
     acc = torch.accelerator.current_accelerator()
-    backend = dist.get_default_backend_for_device(acc)
+
+    backend = "gloo"
+    if acc is not None:
+        backend = dist.get_default_backend_for_device(acc)
 
     # setup distributed process group
     dist.init_process_group(backend=backend)
