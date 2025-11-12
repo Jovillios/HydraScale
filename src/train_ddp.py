@@ -33,10 +33,10 @@ def main():
     model = GPT(vocab_size=vocab_size, n_hidden=n_hidden, n_layers=n_layers, num_heads=num_heads, ffn_ratio=ffn_ratio, attn_dropout=attn_dropout, ffn_dropout=ffn_dropout, max_seq_len=max_seq_len)
 
     # if cuda is available move the model to GPU with id rank
-    if acc == "cuda":
+    if str(acc) == "cuda":
         model.to(device_id)
 
-    if acc == "cuda":
+    if str(acc) == "cuda":
         ddp_model = DDP(model, device_ids=[device_id])
     else:
         ddp_model = DDP(model)
@@ -45,7 +45,7 @@ def main():
     dummy_input = torch.randint(0, vocab_size, (batch_size, max_seq_len))
     dummy_targets = torch.randint(0, vocab_size, (batch_size, max_seq_len))
 
-    if acc == "cuda":
+    if str(acc) == "cuda":
         dummy_input = dummy_input.to(device_id)
         dummy_targets = dummy_targets.to(device_id)
 
