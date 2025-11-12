@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "A distributed training framework for benchmarking the trade-offs between Data, Tensor, and Pipeline Parallelism on GPU clusters."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "torch>=2.9.0",
+    "torchaudio>=2.9.0",
+    "torchvision>=0.24.0",
+]
 
 [tool.ruff]
 line-length = 200
