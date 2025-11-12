@@ -6,7 +6,7 @@ from model import GPT
 import torch.optim as optim
 
 
-def main():
+def train():
     acc = torch.accelerator.current_accelerator()
 
     backend = "gloo"
@@ -32,6 +32,9 @@ def main():
     ffn_dropout = 0.1
     max_seq_len = 256
 
+    batch_size = 4
+    num_steps = 10  # Let's run for 10 steps to test the loop
+
     # Create the model instance
     model = GPT(vocab_size=vocab_size, n_hidden=n_hidden, n_layers=n_layers, num_heads=num_heads, ffn_ratio=ffn_ratio, attn_dropout=attn_dropout, ffn_dropout=ffn_dropout, max_seq_len=max_seq_len)
 
@@ -43,30 +46,34 @@ def main():
         ddp_model = DDP(model, device_ids=[device_id])
     else:
         ddp_model = DDP(model)
-    batch_size = 4
-    # Create some dummy input data
-    dummy_input = torch.randint(0, vocab_size, (batch_size, max_seq_len))
-    dummy_targets = torch.randint(0, vocab_size, (batch_size, max_seq_len))
 
-    if str(acc) == "cuda":
-        dummy_input = dummy_input.to(device_id)
-        dummy_targets = dummy_targets.to(device_id)
+    print(f"Rank {rank}: Starting training loop for {num_steps} steps...")
 
-    optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)
-    optimizer.zero_grad()
+    for step in range(num_steps):
+        # Create some dummy input data
+        dummy_input = torch.randint(0, vocab_size, (batch_size, max_seq_len))
+        dummy_targets = torch.randint(0, vocab_size, (batch_size, max_seq_len))
 
-    _, loss = ddp_model(dummy_input, targets=dummy_targets)
+        if str(acc) == "cuda":
+            dummy_input = dummy_input.to(device_id)
+            dummy_targets = dummy_targets.to(device_id)
 
-    print(f"Rank {rank}, Loss: {loss.item():.2f}")
+        optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)
+        optimizer.zero_grad()
 
-    loss.backward()
-    optimizer.step()
+        _, loss = ddp_model(dummy_input, targets=dummy_targets)
 
-    print(f"Rank {rank} has completed a backward pass.")
+        if rank == 0:
+            print(f"Step {step + 1}/{num_steps}, Loss: {loss.item():.4f}")
+
+        loss.backward()
+        optimizer.step()
+
+    print(f"Rank {rank}: Training loop completed.")
 
     # clean up distributed process group
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    train()
