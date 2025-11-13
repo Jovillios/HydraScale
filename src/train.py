@@ -2,11 +2,14 @@ import os
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from model import GPT
+
 import torch.optim as optim
+from datasets import load_dataset
 from argparse import ArgumentParser
 from transformers import AutoConfig
 
+from model import HydraGPT
+from dataloader import HydraDataLoader
 
 def parse_args():
     parser = ArgumentParser("Training script for GPT model")
@@ -18,37 +21,43 @@ def parse_args():
     parser.add_argument("--hidden_size", type=int, default=256)
     parser.add_argument("--intermediate_size", type=int, default=1024)
 
-    # -- Global Configuration
+    # --- Data Configuration ---
+    parser.add_argument("--dataset", type=str, default="ProCreations/Ultra-FineWeb-EDU")
+    parser.add_argument("--subset", type=int, default=1000)
+    parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--num_proc", type=int, default=2)
+    parser.add_argument("--tokenizer_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
+
+    # --- Training Configuration ---
     parser.add_argument("--seq_len", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_steps", type=int, default=10)
-    parser.add_argument("--vocab_size", type=int, default=1024)
 
     return parser.parse_args()
 
 
-def train(ddp_model, config, batch_size, num_steps):
-    vocab_size = config.vocab_size
-    max_seq_len = config.max_position_embeddings
-    for step in range(num_steps):
-        # Create some dummy input data
-        dummy_input = torch.randint(0, vocab_size, (batch_size, max_seq_len))
-        dummy_targets = torch.randint(0, vocab_size, (batch_size, max_seq_len))
+def train_step(model, optimizer, batch):
+    input_ids = batch["input_ids"]
+    targets = batch["targets"]
 
-        if str(acc) == "cuda":
-            dummy_input = dummy_input.to(device_id)
-            dummy_targets = dummy_targets.to(device_id)
+    optimizer.zero_grad()
+    _, loss = model(input_ids, targets=targets)
+    loss.backward()
+    optimizer.step()
 
-        optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)
-        optimizer.zero_grad()
+    return loss.item()
 
-        _, loss = ddp_model(dummy_input, targets=dummy_targets)
 
+def train_loop(model, dataloader, optimizer, num_steps):
+    model.train()
+    for step, batch in enumerate(dataloader):
+        if step >= num_steps:
+            break
+        loss = train_step(model, optimizer, batch)
         if rank == 0:
-            print(f"Step {step + 1}/{num_steps}, Loss: {loss.item():.4f}")
-
-        loss.backward()
-        optimizer.step()
+            print(f"Step {step + 1}/{num_steps}, Loss: {loss:.4f}")
+    
 
 
 if __name__ == "__main__":
@@ -77,10 +86,20 @@ if __name__ == "__main__":
     model_config.num_attention_heads = args.num_attention_heads
     model_config.hidden_size = args.hidden_size
     model_config.intermediate_size = args.intermediate_size
-    model_config.vocab_size = args.vocab_size
     model_config.max_position_embeddings = args.seq_len
 
-    model = GPT(config=model_config)
+    dataloader = HydraDataLoader(
+        seq_len=args.seq_len,
+        batch_size=batch_size,
+        dataset_name=args.dataset,
+        tokenizer_name=args.tokenizer_name,
+        num_workers=args.num_workers,
+        subset=args.subset,
+        split=args.split,
+        num_proc=args.num_proc,
+    )
+
+    model = HydraGPT(config=model_config)
 
     # if cuda is available move the model to GPU with id rank
     if str(acc) == "cuda":
@@ -91,8 +110,10 @@ if __name__ == "__main__":
     else:
         ddp_model = DDP(model)
 
+    optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)    
+
     print(f"Rank {rank}: Starting training loop for {num_steps} steps...")
-    train(ddp_model, model_config, batch_size, num_steps)
+    train_loop(ddp_model, dataloader, optimizer, num_steps)
 
     print(f"Rank {rank}: Training loop completed.")
 
