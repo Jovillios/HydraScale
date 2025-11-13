@@ -7,23 +7,32 @@ import torch.nn.functional as F
 
 class FeedForward(nn.Module):
     """
-    A standard two-layer feed-forward network with a non-linearity and dropout.
+    A gated two-layer feed-forward network with a non-linearity and dropout.
     """
 
-    def __init__(self, n_hidden: int, n_ffn: int, dropout: float, act_fn=F.relu) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
+        # sanity check
+
+        # parameters
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.hidden_act = config.hidden_act
+
+        # modules
+
         # The network consists of an "up-projection" to a higher dimension,
         # followed by a "down-projection" back to the original dimension.
-        self.up_proj = nn.Linear(n_hidden, n_ffn)
-        self.down_proj = nn.Linear(n_ffn, n_hidden)
-        self.dropout = nn.Dropout(dropout)
-        self.act_fn = act_fn
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size)
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size)
+        self.act_fn = getattr(F, self.hidden_act)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Apply layers in sequence : up-projection -> activation -> down-projection
-        x = self.act_fn(self.up_proj(input))
-        x = self.dropout(x)
-        x = self.down_proj(x)
+        x_gate = F.silu(self.gate_proj(input))
+        x_up = self.up_proj(input)
+        x = self.down_proj(x_gate * x_up)
         return x
 
 
@@ -32,15 +41,23 @@ class Block(nn.Module):
     A single Transformer Block.
     """
 
-    def __init__(self, n_hidden: int, num_heads: int, ffn_ratio: int, attn_dropout: float, ffn_dropout: float) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
-        self.query = nn.Linear(n_hidden, n_hidden)
-        self.key = nn.Linear(n_hidden, n_hidden)
-        self.value = nn.Linear(n_hidden, n_hidden)
-        self.mha = nn.MultiheadAttention(embed_dim=n_hidden, num_heads=num_heads, dropout=attn_dropout, batch_first=True)
-        self.ffn = FeedForward(n_hidden=n_hidden, n_ffn=ffn_ratio * n_hidden, dropout=ffn_dropout)
-        self.ln1 = nn.LayerNorm(n_hidden)
-        self.ln2 = nn.LayerNorm(n_hidden)
+        # sanity check
+
+        # parameters
+        self.hidden_size = config.hidden_size
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_dropout = config.attention_dropout
+
+        # modules
+        self.query = nn.Linear(self.hidden_size, self.hidden_size)
+        self.key = nn.Linear(self.hidden_size, self.hidden_size)
+        self.value = nn.Linear(self.hidden_size, self.hidden_size)
+        self.mha = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=self.num_attention_heads, dropout=self.attention_dropout, batch_first=True)
+        self.ffn = FeedForward(config)
+        self.ln1 = nn.LayerNorm(self.hidden_size)
+        self.ln2 = nn.LayerNorm(self.hidden_size)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         x = self.ln1(input)
@@ -53,17 +70,27 @@ class Block(nn.Module):
         return x
 
 
-class GPT(nn.Module):
+class HydraGPT(nn.Module):
     """
     A minimal Generative Pre-trained Transformer (GPT) model.
     """
 
-    def __init__(self, vocab_size: int, n_hidden: int, n_layers: int, num_heads: int, ffn_ratio: int, attn_dropout: float, ffn_dropout: float, max_seq_len: int = 512) -> None:
+    def __init__(self, config):
         super().__init__()
-        self.token_embed = nn.Embedding(vocab_size, n_hidden)
-        self.pos_embed = nn.Embedding(max_seq_len, n_hidden)
-        self.blocks = nn.Sequential(*[Block(n_hidden=n_hidden, num_heads=num_heads, ffn_ratio=ffn_ratio, attn_dropout=attn_dropout, ffn_dropout=ffn_dropout) for _ in range(n_layers)])
-        self.decoder_head = nn.Linear(n_hidden, vocab_size)
+        # sanity check
+        assert config.hidden_size % config.num_attention_heads == 0
+
+        # parameters
+        self.vocab_size = config.vocab_size
+        self.hidden_size = config.hidden_size
+        self.max_position_embeddings = config.max_position_embeddings
+        self.num_hidden_layers = config.num_hidden_layers
+
+        # modules
+        self.token_embed = nn.Embedding(self.vocab_size, self.hidden_size)
+        self.pos_embed = nn.Embedding(self.max_position_embeddings, self.hidden_size)
+        self.blocks = nn.Sequential(*[Block(config) for _ in range(self.num_hidden_layers)])
+        self.decoder_head = nn.Linear(self.hidden_size, self.vocab_size)
 
     def forward(self, input: torch.Tensor, targets=None):
         # input shape: (batch_size, seq_len)
@@ -94,52 +121,3 @@ class GPT(nn.Module):
 
 
 # -- End of Model Definition ---
-
-
-# --- Self-Testing Block ---
-if __name__ == "__main__":
-    # This block of code will only run when the script is executed directly
-    # (e.g., `python src/model.py`), not when it's imported by another script.
-
-    print("--- Running Model Self-Test ---")
-
-    # Hyperparameters for a small test model
-    vocab_size = 1024
-    n_hidden = 512
-    n_layers = 4
-    num_heads = 8
-    ffn_ratio = 4
-    attn_dropout = 0.1
-    ffn_dropout = 0.1
-    max_seq_len = 256
-
-    # Create the model instance
-    model = GPT(vocab_size=vocab_size, n_hidden=n_hidden, n_layers=n_layers, num_heads=num_heads, ffn_ratio=ffn_ratio, attn_dropout=attn_dropout, ffn_dropout=ffn_dropout, max_seq_len=max_seq_len)
-
-    # --- Test 1: Count Parameters ---
-    def count_parameters(model: nn.Module) -> int:
-        """Counts the number of trainable parameters in a model."""
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print(f"Number of parameters: {count_parameters(model):,d}")
-
-    # --- Test 2: Forward Pass ---
-    print("\n--- Testing forward pass ---")
-    batch_size = 4
-    # Create some dummy input data
-    dummy_input = torch.randint(0, vocab_size, (batch_size, max_seq_len))
-    dummy_targets = torch.randint(0, vocab_size, (batch_size, max_seq_len))
-
-    print(f"Input shape: {dummy_input.shape}")
-
-    # Perform a forward pass
-    logits, loss = model(dummy_input, targets=dummy_targets)
-
-    print(f"Logits shape: {logits.shape}")
-    print(f"Calculated Loss: {loss.item():.2f}")
-
-    # Check if backpropagation works
-    loss.backward()
-    print("Backward pass successful.")
-
-    print("\n--- Model Self-Test Complete ---")
