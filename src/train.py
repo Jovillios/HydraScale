@@ -11,6 +11,7 @@ from transformers import AutoConfig
 from model import HydraGPT
 from dataloader import HydraDataLoader
 
+
 def parse_args():
     parser = ArgumentParser("Training script for GPT model")
 
@@ -57,7 +58,6 @@ def train_loop(model, dataloader, optimizer, num_steps):
         loss = train_step(model, optimizer, batch)
         if rank == 0:
             print(f"Step {step + 1}/{num_steps}, Loss: {loss:.4f}")
-    
 
 
 if __name__ == "__main__":
@@ -97,6 +97,8 @@ if __name__ == "__main__":
         subset=args.subset,
         split=args.split,
         num_proc=args.num_proc,
+        world_size=world_size,
+        rank=rank,
     )
 
     model = HydraGPT(config=model_config)
@@ -110,7 +112,9 @@ if __name__ == "__main__":
     else:
         ddp_model = DDP(model)
 
-    optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)    
+    optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)
+
+    dist.barrier()
 
     print(f"Rank {rank}: Starting training loop for {num_steps} steps...")
     train_loop(ddp_model, dataloader, optimizer, num_steps)
