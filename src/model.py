@@ -70,7 +70,7 @@ class Block(nn.Module):
         return x
 
 
-class GPT(nn.Module):
+class HydraGPT(nn.Module):
     """
     A minimal Generative Pre-trained Transformer (GPT) model.
     """
