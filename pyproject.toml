@@ -5,9 +5,11 @@ description = "A distributed training framework for benchmarking the trade-offs 
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "datasets>=4.4.1",
     "torch>=2.9.0",
     "torchaudio>=2.9.0",
     "torchvision>=0.24.0",
+    "transformers>=4.57.1",
 ]
 
 [tool.ruff]
