@@ -43,7 +43,7 @@ class HydraDataLoader(DataLoader):
         print(result["input_ids"].shape)
         return result
     
-    def tokenize_dataset(self, dataset)
+    def tokenize_dataset(self, dataset):
         return dataset.map(
             lambda examples: self.tokenize_group_text(examples, self.tokenizer, self.seq_len+1),
             batched=True,
