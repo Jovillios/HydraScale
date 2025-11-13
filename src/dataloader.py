@@ -40,7 +40,6 @@ class HydraDataLoader(DataLoader):
         result = {
             "input_ids": concatenated_tokens["input_ids"][:total_length].reshape(-1, seq_len)
         }
-        print(result["input_ids"].shape)
         return result
     
     def tokenize_dataset(self, dataset):
