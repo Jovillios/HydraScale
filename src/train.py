@@ -1,11 +1,13 @@
 import os
+from argparse import ArgumentParser
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-
 import torch.optim as optim
+from torch.profiler import profile, ProfilerActivity, record_function
+
 from datasets import load_dataset
-from argparse import ArgumentParser
 from transformers import AutoConfig
 
 from model import HydraGPT
@@ -38,9 +40,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def train_step(model, optimizer, batch):
-    input_ids = batch["input_ids"]
-    targets = batch["targets"]
+def train_step(model, optimizer, batch, device):
+    input_ids = batch["input_ids"].to(device)
+    targets = batch["targets"].to(device)
 
     optimizer.zero_grad()
     _, loss = model(input_ids, targets=targets)
@@ -50,12 +52,12 @@ def train_step(model, optimizer, batch):
     return loss.item()
 
 
-def train_loop(model, dataloader, optimizer, num_steps):
+def train_loop(model, dataloader, optimizer, num_steps, device):
     model.train()
     for step, batch in enumerate(dataloader):
         if step >= num_steps:
             break
-        loss = train_step(model, optimizer, batch)
+        loss = train_step(model, optimizer, batch, device)
         if rank == 0:
             print(f"Step {step + 1}/{num_steps}, Loss: {loss:.4f}")
 
@@ -105,7 +107,7 @@ if __name__ == "__main__":
 
     # if cuda is available move the model to GPU with id rank
     if str(acc) == "cuda":
-        model.to(device_id)
+        model = model.to(device_id)
 
     if str(acc) == "cuda":
         ddp_model = DDP(model, device_ids=[device_id])
@@ -117,7 +119,7 @@ if __name__ == "__main__":
     dist.barrier()
 
     print(f"Rank {rank}: Starting training loop for {num_steps} steps...")
-    train_loop(ddp_model, dataloader, optimizer, num_steps)
+    train_loop(ddp_model, dataloader, optimizer, num_steps, device_id)
 
     print(f"Rank {rank}: Training loop completed.")
 
