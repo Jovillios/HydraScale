@@ -72,12 +72,13 @@ class HydraDataLoader(DataLoader):
         }
 
     def __iter__(self):
-        if self._iterator is None:
+        # Reset iterator for each epoch
+        if not hasattr(self, '_iterator') or self._iterator is None:
             self._iterator = super().__iter__()
         return self
 
     def __next__(self):
-        if self._iterator is None:
+        if not hasattr(self, '_iterator') or self._iterator is None:
             self._iterator = super().__iter__()
         try:
             batch = next(self._iterator)

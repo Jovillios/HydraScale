@@ -58,7 +58,7 @@ def train_step(model, optimizer, batch, device):
     return loss.item()
 
 
-def train_loop(model, dataloader, optimizer, num_steps, device, prof=None):
+def train_loop(model, dataloader, optimizer, num_steps, device, rank, prof=None):
     model.train()
     for step, batch in enumerate(dataloader):
         if step >= num_steps:
@@ -72,20 +72,32 @@ def train_loop(model, dataloader, optimizer, num_steps, device, prof=None):
 
 
 if __name__ == "__main__":
-    acc = torch.accelerator.current_accelerator()
-
-    backend = "gloo"
-    if acc is not None:
-        backend = dist.get_default_backend_for_device(acc)
-
     # setup distributed process group
+    # torchrun provides RANK and WORLD_SIZE env variables
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    
+    # Determine backend: use nccl for CUDA, gloo for CPU
+    if torch.cuda.is_available():
+        backend = "nccl"
+        device_id = rank % torch.cuda.device_count()
+        device = torch.device(f"cuda:{device_id}")
+    else:
+        backend = "gloo"
+        device = torch.device("cpu")
+        device_id = None
+
+    # Initialize distributed process group
     dist.init_process_group(backend=backend)
 
-    # torchrun provides RANK and WORLD_SIZE env variables
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-
-    device_id = rank % torch.accelerator.device_count()
+    # Print device information
+    if rank == 0:
+        print(f"Using backend: {backend}")
+        if torch.cuda.is_available():
+            print(f"CUDA available: {torch.cuda.device_count()} GPU(s)")
+            print(f"CUDA device name: {torch.cuda.get_device_name(device_id)}")
+        else:
+            print("CUDA not available, using CPU")
 
     args = parse_args()
 
@@ -114,12 +126,12 @@ if __name__ == "__main__":
 
     model = HydraGPT(config=model_config)
 
-    # if cuda is available move the model to GPU with id rank
-    if str(acc) == "cuda":
-        model = model.to(device_id)
+    # Move model to the appropriate device
+    model = model.to(device)
 
-    if str(acc) == "cuda":
-        ddp_model = DDP(model, device_ids=[device_id])
+    # Wrap model with DDP
+    if torch.cuda.is_available() and device_id is not None:
+        ddp_model = DDP(model, device_ids=[device_id], output_device=device_id)
     else:
         ddp_model = DDP(model)
 
@@ -127,13 +139,19 @@ if __name__ == "__main__":
 
     dist.barrier()
 
-    print(f"Rank {rank}: Starting training loop for {num_steps} steps...")
+    if rank == 0:
+        print(f"Starting training loop for {num_steps} steps...")
+        print(f"Model device: {next(ddp_model.parameters()).device}")
+        print(f"World size: {world_size}, Batch size per rank: {batch_size}")
+    
+    # Set epoch for DistributedSampler (important for proper data shuffling)
+    dataloader.sampler.set_epoch(0)
 
     activities = [ProfilerActivity.CPU]
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
 
-    trace_ready = partial(trace_handler, device=device_id)
+    trace_ready = partial(trace_handler, device=device)
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
 
     with profile(
@@ -144,7 +162,7 @@ if __name__ == "__main__":
         profile_memory=True,
         with_stack=True,
     ) as prof:
-        train_loop(ddp_model, dataloader, optimizer, num_steps, device_id, prof)
+        train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank, prof)
 
     print(f"Rank {rank}: Training loop completed.")
 
