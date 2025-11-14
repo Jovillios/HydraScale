@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default="ProCreations/Ultra-FineWeb-EDU")
     parser.add_argument("--subset", type=int, default=1000)
     parser.add_argument("--split", type=str, default="train")
-    parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--num_proc", type=int, default=2)
     parser.add_argument("--tokenizer_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
 
