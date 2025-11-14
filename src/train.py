@@ -43,8 +43,6 @@ def parse_args():
 def train_step(model, optimizer, batch, device):
     input_ids = batch["input_ids"].to(device)
     targets = batch["targets"].to(device)
-    print(input_ids.device)
-    print(model.device)
 
     optimizer.zero_grad()
     _, loss = model(input_ids, targets=targets)
