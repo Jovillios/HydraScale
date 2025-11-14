@@ -51,14 +51,25 @@ def trace_handler(p, device, rank):
         print(f"Exported trace to {trace_path}")
 
 
-def train_step(model, optimizer, batch, device):
-    input_ids = batch["input_ids"].to(device)
-    targets = batch["targets"].to(device)
+def train_step(model, optimizer, batch, device, rank, step):
+    # Move tensors to device (non-blocking if pin_memory is used)
+    input_ids = batch["input_ids"].to(device, non_blocking=True)
+    targets = batch["targets"].to(device, non_blocking=True)
+    
+    # Verify tensors are on the correct device (debug only for first step)
+    if step == 0 and rank == 0:
+        print(f"Input IDs device: {input_ids.device}")
+        print(f"Targets device: {targets.device}")
+        print(f"Model device: {next(model.parameters()).device}")
 
     optimizer.zero_grad()
     _, loss = model(input_ids, targets=targets)
     loss.backward()
     optimizer.step()
+    
+    # Synchronize CUDA operations to ensure they're captured by profiler
+    if input_ids.is_cuda:
+        torch.cuda.synchronize()
 
     return loss.item()
 
@@ -68,7 +79,7 @@ def train_loop(model, dataloader, optimizer, num_steps, device, rank, prof=None)
     for step, batch in enumerate(dataloader):
         if step >= num_steps:
             break
-        loss = train_step(model, optimizer, batch, device)
+        loss = train_step(model, optimizer, batch, device, rank, step)
         if rank == 0:
             print(f"Step {step + 1}/{num_steps}, Loss: {loss:.4f}")
 
@@ -87,6 +98,8 @@ if __name__ == "__main__":
         backend = "nccl"
         device_id = rank % torch.cuda.device_count()
         device = torch.device(f"cuda:{device_id}")
+        # Set the default CUDA device for this process
+        torch.cuda.set_device(device_id)
     else:
         backend = "gloo"
         device = torch.device("cpu")
@@ -131,8 +144,12 @@ if __name__ == "__main__":
 
     model = HydraGPT(config=model_config)
 
-    # Move model to the appropriate device
+    # Move model to the appropriate device BEFORE wrapping with DDP
     model = model.to(device)
+    
+    # Verify model is on the correct device
+    if rank == 0:
+        print(f"Model parameters device before DDP: {next(model.parameters()).device}")
 
     # Wrap model with DDP
     if torch.cuda.is_available() and device_id is not None:
@@ -148,6 +165,10 @@ if __name__ == "__main__":
         print(f"Starting training loop for {num_steps} steps...")
         print(f"Model device: {next(ddp_model.parameters()).device}")
         print(f"World size: {world_size}, Batch size per rank: {batch_size}")
+        # Verify CUDA is being used
+        if torch.cuda.is_available():
+            print(f"Current CUDA device: {torch.cuda.current_device()}")
+            print(f"Device name: {torch.cuda.get_device_name(device_id)}")
     
     # Set epoch for DistributedSampler (important for proper data shuffling)
     dataloader.sampler.set_epoch(0)
@@ -159,6 +180,7 @@ if __name__ == "__main__":
     trace_ready = partial(trace_handler, device=device, rank=rank)
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
 
+    # Configure profiler with explicit CUDA tracking
     with profile(
         activities=activities,
         schedule=schedule,
@@ -166,6 +188,7 @@ if __name__ == "__main__":
         record_shapes=True,
         profile_memory=True,
         with_stack=True,
+        with_flops=True,  # Enable FLOPs counting
     ) as prof:
         train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank, prof)
 
