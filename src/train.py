@@ -41,9 +41,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def trace_handler(p, device):
+def trace_handler(p, device, rank):
     output = p.key_averages().table(row_limit=10)
-    p.export_chrome_trace("/tmp/trace_" + str(p.step_num) + ".json")
+    trace_dir = "/tmp/hydrascale_traces"
+    os.makedirs(trace_dir, exist_ok=True)
+    trace_path = os.path.join(trace_dir, f"trace_rank{rank}_step{p.step_num}.json")
+    p.export_chrome_trace(trace_path)
+    if rank == 0:
+        print(f"Exported trace to {trace_path}")
 
 
 def train_step(model, optimizer, batch, device):
@@ -151,7 +156,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
 
-    trace_ready = partial(trace_handler, device=device)
+    trace_ready = partial(trace_handler, device=device, rank=rank)
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
 
     with profile(
