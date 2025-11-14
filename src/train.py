@@ -42,9 +42,7 @@ def parse_args():
 
 
 def trace_handler(p, device):
-    sort_by_keyword = "self_" + str(device) + "_time_total"
-    output = p.key_averages().table(sort_by=sort_by_keyword, row_limit=10)
-    print(output)
+    output = p.key_averages().table(row_limit=10)
     p.export_chrome_trace("/tmp/trace_" + str(p.step_num) + ".json")
 
 
