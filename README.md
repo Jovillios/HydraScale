@@ -24,9 +24,10 @@ To build a robust, scalable training pipeline for large language models and to d
 ### 🚀 Key Learnings & Benchmarks
 
 **Phase 1 - Data Parallelism (DDP):**
-* ... 
-* ...
-* ...
+*   Successfully built a hardware-agnostic training script capable of running on both CPU (Gloo backend) and multi-GPU (NCCL backend) setups.
+*   Implemented a sophisticated data pipeline to tokenize and batch raw text data efficiently.
+*   Used `torch.profiler` to diagnose a major performance bottleneck, revealing that the data loading pipeline was slower than the model's forward/backward pass. This highlighted the critical importance of optimizing `num_workers` and considering pre-tokenization.
+*   **Key Insight:** While DDP is excellent for scaling compute, it does not solve memory limitations, as every GPU still holds a full copy of the model, gradients, and optimizer states. This perfectly motivates the need for Phase 2
 
 #### 📸 Profiler Screenshot
 
