@@ -1,5 +1,6 @@
 import os
 from argparse import ArgumentParser
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -40,6 +41,13 @@ def parse_args():
     return parser.parse_args()
 
 
+def trace_handler(p, device):
+    sort_by_keyword = "self_" + device + "_time_total"
+    output = p.key_averages().table(sort_by=sort_by_keyword, row_limit=10)
+    print(output)
+    p.export_chrome_trace("/tmp/trace_" + str(p.step_num) + ".json")
+
+
 def train_step(model, optimizer, batch, device):
     input_ids = batch["input_ids"].to(device)
     targets = batch["targets"].to(device)
@@ -52,7 +60,7 @@ def train_step(model, optimizer, batch, device):
     return loss.item()
 
 
-def train_loop(model, dataloader, optimizer, num_steps, device):
+def train_loop(model, dataloader, optimizer, num_steps, device, prof=None):
     model.train()
     for step, batch in enumerate(dataloader):
         if step >= num_steps:
@@ -60,6 +68,9 @@ def train_loop(model, dataloader, optimizer, num_steps, device):
         loss = train_step(model, optimizer, batch, device)
         if rank == 0:
             print(f"Step {step + 1}/{num_steps}, Loss: {loss:.4f}")
+
+        if prof:
+            prof.step()
 
 
 if __name__ == "__main__":
@@ -119,7 +130,23 @@ if __name__ == "__main__":
     dist.barrier()
 
     print(f"Rank {rank}: Starting training loop for {num_steps} steps...")
-    train_loop(ddp_model, dataloader, optimizer, num_steps, device_id)
+
+    activities = [ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
+
+    trace_ready = partial(trace_handler, device=device_id)
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
+
+    with profile(
+        activities=activities,
+        schedule=schedule,
+        on_trace_ready=trace_ready,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
+        train_loop(ddp_model, dataloader, optimizer, num_steps, device_id, prof)
 
     print(f"Rank {rank}: Training loop completed.")
 
