@@ -27,3 +27,12 @@ To build a robust, scalable training pipeline for large language models and to d
 * ... 
 * ...
 * ...
+
+#### 📸 Profiler Screenshot
+
+Below is a screenshot of the HydraScale training loop profiled using PyTorch's built-in Profiler. This gives insights into kernel execution, bottlenecks, and hardware utilization.
+
+<img src="assets/profiler.png" alt="PyTorch Profiler Screenshot" width="800" />
+
+*Example: First forward-backward pass with DDP on a single GPU.*
+
