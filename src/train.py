@@ -91,7 +91,7 @@ class Trainer:
 
     def _run_step(self, input_ids, targets):
         self.optimizer.zero_grad()
-        _, loss = model(input_ids, targets=targets)
+        _, loss = self.model(input_ids, targets=targets)
         loss.backward()
         self.optimizer.step()
         if self.profiler:
@@ -108,7 +108,7 @@ class Trainer:
 
     def _save_checkpoint(self, epoch):
         ckpt = self.model.module.state_dict()
-        PATH = f"checkpoint_{self.gpu_id}.pt"
+        PATH = f"checkpoint_{self.gpu_id}_epoch{epoch}.pt"
         torch.save(ckpt, PATH)
         print(f"Epoch {epoch}: Training checkpoint at {PATH}")
 
