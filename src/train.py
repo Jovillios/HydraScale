@@ -99,11 +99,11 @@ class Trainer:
             self.profiler.step()
 
     def _run_epoch(self, epoch):
-        bs = len(next(iter(self.train_data))[0])
-        print(f"[GPU {self.gpu_id}] Epoch {epoch} | Batchsize: {bs} | Steps: {len(self.train_data)}")
-        for input_ids, targets in self.train_data:
-            input_ids = input_ids.to(self.gpu_id)
-            targets = targets.to(self.gpu_id)
+        bs = len(next(iter(self.train_data))["input_ids"])
+        print(f"[GPU {self.gpu_id}] Epoch {epoch} | Batchsize : {bs} | Steps: {len(self.train_data)}")
+        for batch in self.train_data:
+            input_ids = batch["input_ids"].to(self.gpu_id)
+            targets = batch["targets"].to(self.gpu_id)
             self._run_step(input_ids, targets)
 
     def _save_checkpoint(self, epoch):
