@@ -108,14 +108,14 @@ class Trainer:
 
     def _save_checkpoint(self, epoch):
         ckpt = self.model.module.state_dict()
-        PATH = "checkpoint.pt"
+        PATH = f"checkpoint_{self.gpu_id}.pt"
         torch.save(ckpt, PATH)
         print(f"Epoch {epoch}: Training checkpoint at {PATH}")
 
     def train(self, num_epochs):
         for epoch in range(num_epochs):
             self._run_epoch(epoch)
-            if self.gpu_id == 0 and epoch % self.save_every == 0:
+            if epoch % self.save_every == 0:
                 self._save_checkpoint(epoch)
 
 
