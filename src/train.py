@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--seq_len", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_steps", type=int, default=10)
+    parser.add_argument("--profiler", action="store_true")
 
     return parser.parse_args()
 
@@ -51,11 +52,11 @@ def trace_handler(p, device, rank):
         print(f"Exported trace to {trace_path}")
 
 
-def train_step(model, optimizer, batch, device, rank, step):
+def train_step(model, optimizer, batch, device, rank, step, prof=None):
     # Move tensors to device (non-blocking if pin_memory is used)
     input_ids = batch["input_ids"].to(device, non_blocking=True)
     targets = batch["targets"].to(device, non_blocking=True)
-    
+
     # Verify tensors are on the correct device (debug only for first step)
     if step == 0 and rank == 0:
         print(f"Input IDs device: {input_ids.device}")
@@ -66,9 +67,9 @@ def train_step(model, optimizer, batch, device, rank, step):
     _, loss = model(input_ids, targets=targets)
     loss.backward()
     optimizer.step()
-    
+
     # Synchronize CUDA operations to ensure they're captured by profiler
-    if input_ids.is_cuda:
+    if prof and input_ids.is_cuda:
         torch.cuda.synchronize()
 
     return loss.item()
@@ -92,7 +93,7 @@ if __name__ == "__main__":
     # torchrun provides RANK and WORLD_SIZE env variables
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    
+
     # Determine backend: use nccl for CUDA, gloo for CPU
     if torch.cuda.is_available():
         backend = "nccl"
@@ -146,7 +147,7 @@ if __name__ == "__main__":
 
     # Move model to the appropriate device BEFORE wrapping with DDP
     model = model.to(device)
-    
+
     # Verify model is on the correct device
     if rank == 0:
         print(f"Model parameters device before DDP: {next(model.parameters()).device}")
@@ -169,28 +170,31 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             print(f"Current CUDA device: {torch.cuda.current_device()}")
             print(f"Device name: {torch.cuda.get_device_name(device_id)}")
-    
+
     # Set epoch for DistributedSampler (important for proper data shuffling)
     dataloader.sampler.set_epoch(0)
 
-    activities = [ProfilerActivity.CPU]
-    if torch.cuda.is_available():
-        activities.append(ProfilerActivity.CUDA)
+    if args.profiler:
+        activities = [ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(ProfilerActivity.CUDA)
 
-    trace_ready = partial(trace_handler, device=device, rank=rank)
-    schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
+        trace_ready = partial(trace_handler, device=device, rank=rank)
+        schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
 
-    # Configure profiler with explicit CUDA tracking
-    with profile(
-        activities=activities,
-        schedule=schedule,
-        on_trace_ready=trace_ready,
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-        with_flops=True,  # Enable FLOPs counting
-    ) as prof:
-        train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank, prof)
+        # Configure profiler with explicit CUDA tracking
+        with profile(
+            activities=activities,
+            schedule=schedule,
+            on_trace_ready=trace_ready,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            with_flops=True,  # Enable FLOPs counting
+        ) as prof:
+            train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank, prof)
+    else:
+        train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank)
 
     print(f"Rank {rank}: Training loop completed.")
 
