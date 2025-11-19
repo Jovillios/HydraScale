@@ -87,7 +87,6 @@ class Trainer:
         self.gpu_id = int(os.environ["LOCAL_RANK"])
         self.model = model.to(self.gpu_id)
         self.model = DDP(model, device_ids=[self.gpu_id])
-        self.snapshot_path = self.snapshot_path
         self.profiler = profiler
 
     def _run_step(self, input_ids, targets):
@@ -108,7 +107,7 @@ class Trainer:
             self._run_step(input_ids, targets)
 
     def _save_checkpoint(self, epoch):
-        ckpt = self.model.module.save_dict()
+        ckpt = self.model.module.state_dict()
         PATH = "checkpoint.pt"
         torch.save(ckpt, PATH)
         print(f"Epoch {epoch}: Training checkpoint at {PATH}")
