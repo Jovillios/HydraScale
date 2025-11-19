@@ -85,7 +85,7 @@ class Trainer:
         self.save_every = save_every
 
         self.gpu_id = int(os.environ["LOCAL_RANK"])
-        self.model = self.model.to(self.gpu_id)
+        self.model = model.to(self.gpu_id)
         self.model = DDP(model, device_ids=[self.gpu_id])
         self.snapshot_path = self.snapshot_path
         self.profiler = profiler
