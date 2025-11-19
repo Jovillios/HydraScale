@@ -20,10 +20,10 @@ def parse_args():
 
     # --- Model Configuration ---
     parser.add_argument("--model_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
-    parser.add_argument("--num_hidden_layers", type=int, default=4)
-    parser.add_argument("--num_attention_heads", type=int, default=8)
-    parser.add_argument("--hidden_size", type=int, default=256)
-    parser.add_argument("--intermediate_size", type=int, default=1024)
+    parser.add_argument("--num_hidden_layers", type=int, default=32)
+    parser.add_argument("--num_attention_heads", type=int, default=16)
+    parser.add_argument("--hidden_size", type=int, default=2048)
+    parser.add_argument("--intermediate_size", type=int, default=8192)
 
     # --- Data Configuration ---
     parser.add_argument("--dataset", type=str, default="ProCreations/Ultra-FineWeb-EDU")

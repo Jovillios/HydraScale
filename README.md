@@ -17,7 +17,7 @@ To build a robust, scalable training pipeline for large language models and to d
 > For a detailed, task-by-task breakdown of my work, please see the [Project Kanban Board](https://github.com/users/Jovillios/projects/4).
 
 - [x] **Phase 1: Foundational Setup & Data Parallelism**
-- [ ] **Phase 2: Advanced Memory Optimization with ZeRO**
+- [x] **Phase 2: Advanced Memory Optimization with ZeRO**
 - [ ] **Phase 3: Model Parallelism (Tensor & Pipeline)**
 - [ ] **Phase 4: Advanced Optimizations & Final Analysis**
 
@@ -37,3 +37,8 @@ Below is a screenshot of the HydraScale training loop profiled using PyTorch's b
 
 *Example: First forward-backward pass with DDP on a single GPU.*
 
+#### 📸 OOM Screenshot
+
+Below is a screenshot of a out of memory error obtain when scaling the model to the limit of the GPUs without using any sharding strategy yet.
+
+<img src="assets/oom.png" alt="OOM Screenshot" width="800" />
