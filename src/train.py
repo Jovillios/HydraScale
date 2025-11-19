@@ -47,9 +47,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def trace_handler(p, device, rank):
-    output = p.key_averages().table(row_limit=10)
-    trace_dir = "/tmp/hydrascale_traces"
+def trace_handler(p):
+    rank = int(os.environ["LOCAL_RANK"])
+    trace_dir = "hydrascale_traces"
     os.makedirs(trace_dir, exist_ok=True)
     trace_path = os.path.join(trace_dir, f"trace_rank{rank}_step{p.step_num}.json")
     p.export_chrome_trace(trace_path)
@@ -64,7 +64,7 @@ def ddp_setup():
 
 def profiler_setup():
     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
-    schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
+    schedule = torch.profiler.schedule(wait=49, warmup=1, active=2)
 
     # Configure profiler with explicit CUDA tracking
     return profile(
