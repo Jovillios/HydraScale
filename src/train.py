@@ -1,4 +1,6 @@
 import os
+import sys
+
 from argparse import ArgumentParser
 from functools import partial
 
@@ -9,6 +11,7 @@ import torch.optim as optim
 from torch.profiler import profile, ProfilerActivity, record_function
 
 from datasets import load_dataset
+from torch.utils.data import DataLoader
 from transformers import AutoConfig
 
 from model import HydraGPT
@@ -38,6 +41,8 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--profiler", action="store_true")
+    parser.add_argument("--save_every", type=int, default=1)
+    parser.add_argument("--num_epochs", type=int, default=1)
 
     return parser.parse_args()
 
@@ -52,74 +57,78 @@ def trace_handler(p, device, rank):
         print(f"Exported trace to {trace_path}")
 
 
-def train_step(model, optimizer, batch, device, rank, step, prof=None):
-    # Move tensors to device (non-blocking if pin_memory is used)
-    input_ids = batch["input_ids"].to(device, non_blocking=True)
-    targets = batch["targets"].to(device, non_blocking=True)
-
-    # Verify tensors are on the correct device (debug only for first step)
-    if step == 0 and rank == 0:
-        print(f"Input IDs device: {input_ids.device}")
-        print(f"Targets device: {targets.device}")
-        print(f"Model device: {next(model.parameters()).device}")
-
-    optimizer.zero_grad()
-    _, loss = model(input_ids, targets=targets)
-    loss.backward()
-    optimizer.step()
-
-    # Synchronize CUDA operations to ensure they're captured by profiler
-    if prof and input_ids.is_cuda:
-        torch.cuda.synchronize()
-
-    return loss.item()
+def ddp_setup():
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group(backend="nccl")
 
 
-def train_loop(model, dataloader, optimizer, num_steps, device, rank, prof=None):
-    model.train()
-    for step, batch in enumerate(dataloader):
-        if step >= num_steps:
-            break
-        loss = train_step(model, optimizer, batch, device, rank, step)
-        if rank == 0:
-            print(f"Step {step + 1}/{num_steps}, Loss: {loss:.4f}")
+def profiler_setup():
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
 
-        if prof:
-            prof.step()
+    # Configure profiler with explicit CUDA tracking
+    return profile(
+        activities=activities,
+        schedule=schedule,
+        on_trace_ready=trace_handler,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=True,  # Enable FLOPs counting
+    )
+
+
+class Trainer:
+    def __init__(self, model: torch.nn.Module, train_data: DataLoader, optimizer: torch.optim.Optimizer, save_every: int, profiler=None) -> None:
+        self.train_data = train_data
+        self.optimizer = optimizer
+        self.save_every = save_every
+
+        self.gpu_id = os.environ["LOCAL_RANK"]
+        self.model = DDP(model, device_ids=[self.gpu_id])
+        self.snapshot_path = self.snapshot_path
+        self.profiler = profiler
+
+    def _run_step(self, input_ids, targets):
+        self.optimizer.zero_grad()
+        _, loss = model(input_ids, targets=targets)
+        loss.backward()
+        self.optimizer.step()
+        if self.profiler:
+            torch.cuda.synchronize()
+            self.profiler.step()
+
+    def _run_epoch(self, epoch):
+        bs = len(next(iter(self.train_data))[0])
+        print(f"[GPU {self.gpu_id}] Epoch {epoch} | Batchsize: {bs} | Steps: {len(self.train_data)}")
+        for input_ids, targets in self.train_data:
+            input_ids = input_ids.to(self.gpu_id)
+            targets = targets.to(self.gpu_id)
+            self._run_step(input_ids, targets)
+
+    def _save_checkpoint(self, epoch):
+        ckpt = self.model.module.save_dict()
+        PATH = "checkpoint.pt"
+        torch.save(ckpt, PATH)
+        print(f"Epoch {epoch}: Training checkpoint at {PATH}")
+
+    def train(self, num_epochs):
+        for epoch in range(num_epochs):
+            self._run_epoch(epoch)
+            if self.gpu_id == 0 and epoch % self.save_every == 0:
+                self._save_checkpoint(epoch)
 
 
 if __name__ == "__main__":
-    # setup distributed process group
-    # torchrun provides RANK and WORLD_SIZE env variables
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    # --- 1. HARDWARE VALIDATION ---
+    if not torch.cuda.is_available():
+        print("ERROR: This training script requires a CUDA-enabled GPU.", file=sys.stderr)
+        print("       Please run on a machine with an NVIDIA GPU.", file=sys.stderr)
+        sys.exit(1)  # Exit the script with an error code
 
-    # Determine backend: use nccl for CUDA, gloo for CPU
-    if torch.cuda.is_available():
-        backend = "nccl"
-        device_id = rank % torch.cuda.device_count()
-        device = torch.device(f"cuda:{device_id}")
-        # Set the default CUDA device for this process
-        torch.cuda.set_device(device_id)
-    else:
-        backend = "gloo"
-        device = torch.device("cpu")
-        device_id = None
-
-    # Initialize distributed process group
-    dist.init_process_group(backend=backend)
-
-    # Print device information
-    if rank == 0:
-        print(f"Using backend: {backend}")
-        if torch.cuda.is_available():
-            print(f"CUDA available: {torch.cuda.device_count()} GPU(s)")
-            print(f"CUDA device name: {torch.cuda.get_device_name(device_id)}")
-        else:
-            print("CUDA not available, using CPU")
+    ddp_setup()
 
     args = parse_args()
-
     num_steps = args.num_steps
     batch_size = args.batch_size
 
@@ -139,64 +148,20 @@ if __name__ == "__main__":
         subset=args.subset,
         split=args.split,
         num_proc=args.num_proc,
-        world_size=world_size,
-        rank=rank,
+        rank=int(os.environ["LOCAL_RANK"]),
+        world_size=int(os.environ["WORLD_SIZE"]),
     )
 
     model = HydraGPT(config=model_config)
-
-    # Move model to the appropriate device BEFORE wrapping with DDP
-    model = model.to(device)
-
-    # Verify model is on the correct device
-    if rank == 0:
-        print(f"Model parameters device before DDP: {next(model.parameters()).device}")
-
-    # Wrap model with DDP
-    if torch.cuda.is_available() and device_id is not None:
-        ddp_model = DDP(model, device_ids=[device_id], output_device=device_id)
-    else:
-        ddp_model = DDP(model)
-
-    optimizer = optim.AdamW(ddp_model.parameters(), lr=1e-3)
-
-    dist.barrier()
-
-    if rank == 0:
-        print(f"Starting training loop for {num_steps} steps...")
-        print(f"Model device: {next(ddp_model.parameters()).device}")
-        print(f"World size: {world_size}, Batch size per rank: {batch_size}")
-        # Verify CUDA is being used
-        if torch.cuda.is_available():
-            print(f"Current CUDA device: {torch.cuda.current_device()}")
-            print(f"Device name: {torch.cuda.get_device_name(device_id)}")
-
-    # Set epoch for DistributedSampler (important for proper data shuffling)
-    dataloader.sampler.set_epoch(0)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
 
     if args.profiler:
-        activities = [ProfilerActivity.CPU]
-        if torch.cuda.is_available():
-            activities.append(ProfilerActivity.CUDA)
-
-        trace_ready = partial(trace_handler, device=device, rank=rank)
-        schedule = torch.profiler.schedule(wait=1, warmup=1, active=2)
-
-        # Configure profiler with explicit CUDA tracking
-        with profile(
-            activities=activities,
-            schedule=schedule,
-            on_trace_ready=trace_ready,
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            with_flops=True,  # Enable FLOPs counting
-        ) as prof:
-            train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank, prof)
+        with profiler_setup() as profiler:
+            trainer = Trainer(model, dataloader, optimizer, args.save_every, profiler)
     else:
-        train_loop(ddp_model, dataloader, optimizer, num_steps, device, rank)
+        trainer = Trainer(model, dataloader, optimizer, args.save_every)
 
-    print(f"Rank {rank}: Training loop completed.")
+    trainer.train(args.num_epochs)
 
     # clean up distributed process group
     dist.destroy_process_group()
