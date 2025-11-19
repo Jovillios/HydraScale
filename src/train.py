@@ -1,167 +1,212 @@
 import os
 import sys
-
-from argparse import ArgumentParser
-from functools import partial
+import logging
+from argparse import ArgumentParser, Namespace
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Optional, Any
 
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.optim as optim
-from torch.profiler import profile, ProfilerActivity, record_function
-
-from datasets import load_dataset
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.profiler import profile, ProfilerActivity, schedule
 from torch.utils.data import DataLoader
 from transformers import AutoConfig
 
+# Local imports
 from model import HydraGPT
 from dataloader import HydraDataLoader
 
-
-def parse_args():
-    parser = ArgumentParser("Training script for GPT model")
-
-    # --- Model Configuration ---
-    parser.add_argument("--model_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
-    parser.add_argument("--num_hidden_layers", type=int, default=32)
-    parser.add_argument("--num_attention_heads", type=int, default=16)
-    parser.add_argument("--hidden_size", type=int, default=2048)
-    parser.add_argument("--intermediate_size", type=int, default=8192)
-
-    # --- Data Configuration ---
-    parser.add_argument("--dataset", type=str, default="ProCreations/Ultra-FineWeb-EDU")
-    parser.add_argument("--subset", type=int, default=1000)
-    parser.add_argument("--split", type=str, default="train")
-    parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--num_proc", type=int, default=2)
-    parser.add_argument("--tokenizer_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
-
-    # --- Training Configuration ---
-    parser.add_argument("--seq_len", type=int, default=128)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_steps", type=int, default=10)
-    parser.add_argument("--profiler", action="store_true")
-    parser.add_argument("--save_every", type=int, default=1)
-    parser.add_argument("--num_epochs", type=int, default=1)
-
-    return parser.parse_args()
+# --- Utilities ---
 
 
-def trace_handler(p):
-    rank = int(os.environ["LOCAL_RANK"])
-    trace_dir = "hydrascale_traces"
-    os.makedirs(trace_dir, exist_ok=True)
-    trace_path = os.path.join(trace_dir, f"trace_rank{rank}_step{p.step_num}.json")
-    p.export_chrome_trace(trace_path)
-    if rank == 0:
-        print(f"Exported trace to {trace_path}")
+def get_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", 0))
 
 
-def ddp_setup():
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+def dist_print(msg: str, rank: int = 0):
+    """Helper to print only on a specific rank (default 0)."""
+    if get_rank() == rank:
+        print(f"[Rank {get_rank()}] {msg}")
+
+
+def setup_distributed_environment():
+    """Validates hardware and initializes DDP."""
+    if not torch.cuda.is_available():
+        sys.stderr.write("ERROR: CUDA-enabled GPU required.\n")
+        sys.exit(1)
+
+    local_rank = get_rank()
+    torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl")
 
 
-def profiler_setup():
-    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
-    schedule = torch.profiler.schedule(wait=49, warmup=1, active=2)
+def cleanup_distributed_environment():
+    dist.destroy_process_group()
 
-    # Configure profiler with explicit CUDA tracking
+
+def get_profiler(args: Namespace):
+    """Sets up the Torch profiler based on command line args."""
+    if not args.profiler:
+        return nullcontext()
+
+    def trace_handler(p):
+        rank = get_rank()
+        trace_dir = Path("hydrascale_traces")
+        trace_dir.mkdir(exist_ok=True)
+        output = trace_dir / f"trace_rank{rank}_step{p.step_num}.json"
+        p.export_chrome_trace(str(output))
+        dist_print(f"Exported trace to {output}")
+
     return profile(
-        activities=activities,
-        schedule=schedule,
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=schedule(wait=args.prof_wait, warmup=args.prof_warmup, active=args.prof_active, repeat=args.prof_repeat),
         on_trace_ready=trace_handler,
         record_shapes=True,
         profile_memory=True,
         with_stack=True,
-        with_flops=True,  # Enable FLOPs counting
+        with_flops=True,
     )
 
 
+# --- Trainer Class ---
+
+
 class Trainer:
-    def __init__(self, model: torch.nn.Module, train_data: DataLoader, optimizer: torch.optim.Optimizer, save_every: int, profiler=None) -> None:
+    def __init__(self, model: torch.nn.Module, train_data: DataLoader, optimizer: torch.optim.Optimizer, save_every: int, profiler: Optional[Any] = None) -> None:
+        self.local_rank = get_rank()
         self.train_data = train_data
         self.optimizer = optimizer
         self.save_every = save_every
-
-        self.gpu_id = int(os.environ["LOCAL_RANK"])
-        self.model = model.to(self.gpu_id)
-        self.model = DDP(model, device_ids=[self.gpu_id])
         self.profiler = profiler
 
-    def _run_step(self, input_ids, targets):
+        # Move model to device and wrap in DDP
+        self.model = model.to(self.local_rank)
+        self.model = DDP(model, device_ids=[self.local_rank])
+
+    def _run_step(self, input_ids: torch.Tensor, targets: torch.Tensor):
         self.optimizer.zero_grad()
         _, loss = self.model(input_ids, targets=targets)
         loss.backward()
         self.optimizer.step()
-        if self.profiler:
+
+        # Step the profiler if it exists
+        if self.profiler and not isinstance(self.profiler, nullcontext):
             torch.cuda.synchronize()
             self.profiler.step()
 
-    def _run_epoch(self, epoch):
-        bs = len(next(iter(self.train_data))["input_ids"])
-        print(f"[GPU {self.gpu_id}] Epoch {epoch} | Batchsize : {bs} | Steps: {len(self.train_data)}")
-        for batch in self.train_data:
-            input_ids = batch["input_ids"].to(self.gpu_id)
-            targets = batch["targets"].to(self.gpu_id)
-            self._run_step(input_ids, targets)
+    def _save_checkpoint(self, epoch: int):
+        if self.local_rank == 0:
+            ckpt_path = Path(f"checkpoint_epoch{epoch}.pt")
+            torch.save(self.model.module.state_dict(), ckpt_path)
+            dist_print(f"Saved checkpoint: {ckpt_path}")
 
-    def _save_checkpoint(self, epoch):
-        ckpt = self.model.module.state_dict()
-        PATH = f"checkpoint_{self.gpu_id}_epoch{epoch}.pt"
-        torch.save(ckpt, PATH)
-        print(f"Epoch {epoch}: Training checkpoint at {PATH}")
+    def train(self, num_epochs: int):
+        dist_print("Starting training...")
 
-    def train(self, num_epochs):
         for epoch in range(num_epochs):
-            self._run_epoch(epoch)
+            dist_print(f"Epoch {epoch} | Steps: {len(self.train_data)}")
+
+            # Crucial for shuffling in DDP
+            if hasattr(self.train_data, "sampler") and hasattr(self.train_data.sampler, "set_epoch"):
+                self.train_data.sampler.set_epoch(epoch)
+
+            for batch in self.train_data:
+                input_ids = batch["input_ids"].to(self.local_rank)
+                targets = batch["targets"].to(self.local_rank)
+                self._run_step(input_ids, targets)
+
             if epoch % self.save_every == 0:
                 self._save_checkpoint(epoch)
 
 
-if __name__ == "__main__":
-    # --- 1. HARDWARE VALIDATION ---
-    if not torch.cuda.is_available():
-        print("ERROR: This training script requires a CUDA-enabled GPU.", file=sys.stderr)
-        print("       Please run on a machine with an NVIDIA GPU.", file=sys.stderr)
-        sys.exit(1)  # Exit the script with an error code
+# --- Configuration ---
 
-    ddp_setup()
 
+def parse_args() -> Namespace:
+    parser = ArgumentParser(description="HydraGPT Distributed Training")
+
+    # Model Group
+    group_model = parser.add_argument_group("Model Configuration")
+    group_model.add_argument("--model_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
+    group_model.add_argument("--num_hidden_layers", type=int, default=4)
+    group_model.add_argument("--num_attention_heads", type=int, default=8)
+    group_model.add_argument("--hidden_size", type=int, default=256)
+    group_model.add_argument("--intermediate_size", type=int, default=1024)
+
+    # Data Group
+    group_data = parser.add_argument_group("Data Configuration")
+    group_data.add_argument("--dataset", type=str, default="ProCreations/Ultra-FineWeb-EDU")
+    group_data.add_argument("--subset", type=int, default=1000)
+    group_data.add_argument("--split", type=str, default="train")
+    group_data.add_argument("--tokenizer_name", type=str, default="HuggingFaceTB/SmolLM-360M-Instruct")
+    group_data.add_argument("--num_workers", type=int, default=0)
+    group_data.add_argument("--num_proc", type=int, default=2)
+
+    # Training Group
+    group_train = parser.add_argument_group("Training Configuration")
+    group_train.add_argument("--seq_len", type=int, default=128)
+    group_train.add_argument("--batch_size", type=int, default=4)
+    group_train.add_argument("--num_epochs", type=int, default=1)
+    group_train.add_argument("--save_every", type=int, default=1)
+    group_train.add_argument("--lr", type=float, default=1e-3)
+
+    # Profiler Group
+    group_prof = parser.add_argument_group("Profiler Configuration")
+    group_prof.add_argument("--profiler", action="store_true", help="Enable PyTorch Profiler")
+    group_prof.add_argument("--prof_wait", type=int, default=10, help="Steps to wait before profiling")
+    group_prof.add_argument("--prof_warmup", type=int, default=1, help="Warmup steps")
+    group_prof.add_argument("--prof_active", type=int, default=3, help="Steps to actively record")
+    group_prof.add_argument("--prof_repeat", type=int, default=1, help="Number of profiling cycles")
+
+    return parser.parse_args()
+
+
+# --- Main Execution ---
+
+
+def main():
+    setup_distributed_environment()
     args = parse_args()
-    num_steps = args.num_steps
-    batch_size = args.batch_size
 
-    model_config = AutoConfig.from_pretrained(args.model_name)
-    model_config.num_hidden_layers = args.num_hidden_layers
-    model_config.num_attention_heads = args.num_attention_heads
-    model_config.hidden_size = args.hidden_size
-    model_config.intermediate_size = args.intermediate_size
-    model_config.max_position_embeddings = args.seq_len
+    # Config Setup
+    config = AutoConfig.from_pretrained(args.model_name)
+    config.update(
+        {
+            "num_hidden_layers": args.num_hidden_layers,
+            "num_attention_heads": args.num_attention_heads,
+            "hidden_size": args.hidden_size,
+            "intermediate_size": args.intermediate_size,
+            "max_position_embeddings": args.seq_len,
+        }
+    )
 
+    # Data Loading
     dataloader = HydraDataLoader(
         seq_len=args.seq_len,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         dataset_name=args.dataset,
         tokenizer_name=args.tokenizer_name,
         num_workers=args.num_workers,
         subset=args.subset,
         split=args.split,
         num_proc=args.num_proc,
-        rank=int(os.environ["LOCAL_RANK"]),
+        rank=get_rank(),
         world_size=int(os.environ["WORLD_SIZE"]),
     )
 
-    model = HydraGPT(config=model_config)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    # Model & Optimizer
+    model = HydraGPT(config=config)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
-    if args.profiler:
-        with profiler_setup() as profiler:
-            trainer = Trainer(model, dataloader, optimizer, args.save_every, profiler)
-    else:
-        trainer = Trainer(model, dataloader, optimizer, args.save_every)
+    # Training with Dynamic Profiler
+    with get_profiler(args) as profiler:
+        trainer = Trainer(model=model, train_data=dataloader, optimizer=optimizer, save_every=args.save_every, profiler=profiler)
+        trainer.train(args.num_epochs)
 
-    trainer.train(args.num_epochs)
+    cleanup_distributed_environment()
 
-    # clean up distributed process group
-    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    main()
