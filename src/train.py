@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.profiler import profile, ProfilerActivity, schedule
 from torch.utils.data import DataLoader
 from transformers import AutoConfig
@@ -74,16 +75,19 @@ def get_profiler(args: Namespace):
 
 
 class Trainer:
-    def __init__(self, model: torch.nn.Module, train_data: DataLoader, optimizer: torch.optim.Optimizer, save_every: int, profiler: Optional[Any] = None) -> None:
+    def __init__(self, model: torch.nn.Module, train_data: DataLoader, lr: float, save_every: int, profiler: Optional[Any] = None, fsdp_kwargs: Optional[Any] = None) -> None:
         self.local_rank = get_rank()
         self.train_data = train_data
-        self.optimizer = optimizer
         self.save_every = save_every
         self.profiler = profiler
 
-        # Move model to device and wrap in DDP
+        fsdp_config = fsdp_kwargs if fsdp_kwargs is not None else {}
+
         self.model = model.to(self.local_rank)
-        self.model = DDP(model, device_ids=[self.local_rank])
+        for layer in self.model.layers:
+            fully_shard(layer, **fsdp_config)
+        fully_shard(self.model, **fsdp_config)
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr)
 
     def _run_step(self, input_ids: torch.Tensor, targets: torch.Tensor):
         self.optimizer.zero_grad()
@@ -99,7 +103,7 @@ class Trainer:
     def _save_checkpoint(self, epoch: int):
         if self.local_rank == 0:
             ckpt_path = Path(f"checkpoint_epoch{epoch}.pt")
-            torch.save(self.model.module.state_dict(), ckpt_path)
+            torch.save(self.model.state_dict(), ckpt_path)
             dist_print(f"Saved checkpoint: {ckpt_path}")
 
     def train(self, num_epochs: int):
@@ -151,6 +155,7 @@ def parse_args() -> Namespace:
     group_train.add_argument("--num_epochs", type=int, default=1)
     group_train.add_argument("--save_every", type=int, default=1)
     group_train.add_argument("--lr", type=float, default=1e-3)
+    group_train.add_argument("--mixed_precision", action="store_true", help="Enable FSDP mixed precision")
 
     # Profiler Group
     group_prof = parser.add_argument_group("Profiler Configuration")
@@ -198,11 +203,17 @@ def main():
 
     # Model & Optimizer
     model = HydraGPT(config=config)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+
+    fsdp_kwargs = {}
+    if args.mixed_precision:
+        fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
 
     # Training with Dynamic Profiler
     with get_profiler(args) as profiler:
-        trainer = Trainer(model=model, train_data=dataloader, optimizer=optimizer, save_every=args.save_every, profiler=profiler)
+        trainer = Trainer(model=model, train_data=dataloader, lr=args.lr, save_every=args.save_every, profiler=profiler, fsdp_kwargs=fsdp_kwargs)
         trainer.train(args.num_epochs)
 
     cleanup_distributed_environment()
