@@ -89,7 +89,9 @@ class HydraGPT(nn.Module):
         # modules
         self.token_embed = nn.Embedding(self.vocab_size, self.hidden_size)
         self.pos_embed = nn.Embedding(self.max_position_embeddings, self.hidden_size)
-        self.blocks = nn.Sequential(*[Block(config) for _ in range(self.num_hidden_layers)])
+        self.layers = nn.ModuleList()
+        for _ in range(self.num_hidden_layers):
+            self.layers.append(Block(config))
         self.decoder_head = nn.Linear(self.hidden_size, self.vocab_size)
 
     def forward(self, input: torch.Tensor, targets=None):
@@ -105,7 +107,8 @@ class HydraGPT(nn.Module):
         x = tok_emb + pos_embed  # (B, T, C)
 
         # Pass through the Transformer blocks
-        x = self.blocks(x)  # (B, T, C)
+        for layer in self.layers:
+            x = layer(x)  # (B, T, C)
 
         # Get logits from decoder head
         logits = self.decoder_head(x)
