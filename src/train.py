@@ -18,6 +18,7 @@ from transformers import AutoConfig
 # Local imports
 from model import HydraGPT
 from dataloader import HydraDataLoader
+from tensor_parallel import init_tensor_parallel
 
 # --- Utilities ---
 
@@ -157,6 +158,9 @@ def parse_args() -> Namespace:
     group_train.add_argument("--lr", type=float, default=1e-3)
     group_train.add_argument("--mixed_precision", action="store_true", help="Enable FSDP mixed precision")
 
+    group_parallel = parser.add_argument_group("Parallelism Configuration")
+    group_parallel.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of ranks participating in tensor parallelism")
+
     # Profiler Group
     group_prof = parser.add_argument_group("Profiler Configuration")
     group_prof.add_argument("--profiler", action="store_true", help="Enable PyTorch Profiler")
@@ -174,6 +178,7 @@ def parse_args() -> Namespace:
 def main():
     setup_distributed_environment()
     args = parse_args()
+    tp_state = init_tensor_parallel(args.tensor_parallel_size)
 
     # Config Setup
     config = AutoConfig.from_pretrained(args.model_name)
@@ -188,6 +193,9 @@ def main():
     )
 
     # Data Loading
+    data_world_size = tp_state.dp_size if tp_state is not None else int(os.environ["WORLD_SIZE"])
+    data_rank = tp_state.dp_rank if tp_state is not None else get_rank()
+
     dataloader = HydraDataLoader(
         seq_len=args.seq_len,
         batch_size=args.batch_size,
@@ -197,8 +205,8 @@ def main():
         subset=args.subset,
         split=args.split,
         num_proc=args.num_proc,
-        rank=get_rank(),
-        world_size=int(os.environ["WORLD_SIZE"]),
+        rank=data_rank,
+        world_size=data_world_size,
     )
 
     # Model & Optimizer

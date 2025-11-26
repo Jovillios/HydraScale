@@ -1,6 +1,10 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from tensor_parallel import ColumnParallelLinear, RowParallelLinear, get_tensor_parallel_state
 
 # --- Core building blocks of the Transformer ---
 
@@ -23,9 +27,10 @@ class FeedForward(nn.Module):
 
         # The network consists of an "up-projection" to a higher dimension,
         # followed by a "down-projection" back to the original dimension.
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size)
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size)
+        tp_state = get_tensor_parallel_state()
+        self.up_proj = ColumnParallelLinear(self.hidden_size, self.intermediate_size, gather_output=False, tp_state=tp_state)
+        self.gate_proj = ColumnParallelLinear(self.hidden_size, self.intermediate_size, gather_output=False, tp_state=tp_state)
+        self.down_proj = RowParallelLinear(self.intermediate_size, self.hidden_size, input_is_parallel=True, tp_state=tp_state)
         self.act_fn = getattr(F, self.hidden_act)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -34,6 +39,54 @@ class FeedForward(nn.Module):
         x_up = self.up_proj(input)
         x = self.down_proj(x_gate * x_up)
         return x
+
+
+class SelfAttention(nn.Module):
+    """
+    Tensor-parallel friendly self-attention.
+    """
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_dropout = getattr(config, "attention_dropout", 0.0)
+
+        tp_state = get_tensor_parallel_state()
+        tp_size = tp_state.tp_size if tp_state is not None else 1
+        if self.num_attention_heads % tp_size != 0:
+            raise ValueError("num_attention_heads must be divisible by tensor parallel size.")
+
+        self.num_heads_per_rank = self.num_attention_heads // tp_size
+        self.head_dim = self.hidden_size // self.num_attention_heads
+
+        self.q_proj = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, gather_output=False, tp_state=tp_state)
+        self.k_proj = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, gather_output=False, tp_state=tp_state)
+        self.v_proj = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, gather_output=False, tp_state=tp_state)
+        self.out_proj = RowParallelLinear(self.hidden_size, self.hidden_size, bias=False, input_is_parallel=True, tp_state=tp_state)
+        self.dropout = nn.Dropout(self.attention_dropout)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        B, T, _ = input.shape
+
+        q = self.q_proj(input)
+        k = self.k_proj(input)
+        v = self.v_proj(input)
+
+        def reshape(x):
+            return x.view(B, T, self.num_heads_per_rank, self.head_dim).transpose(1, 2)
+
+        q = reshape(q)
+        k = reshape(k)
+        v = reshape(v)
+
+        attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, -1)
+        return self.out_proj(attn_output)
 
 
 class Block(nn.Module):
@@ -47,25 +100,15 @@ class Block(nn.Module):
 
         # parameters
         self.hidden_size = config.hidden_size
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_dropout = config.attention_dropout
 
         # modules
-        self.query = nn.Linear(self.hidden_size, self.hidden_size)
-        self.key = nn.Linear(self.hidden_size, self.hidden_size)
-        self.value = nn.Linear(self.hidden_size, self.hidden_size)
-        self.mha = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=self.num_attention_heads, dropout=self.attention_dropout, batch_first=True)
+        self.attn = SelfAttention(config)
         self.ffn = FeedForward(config)
         self.ln1 = nn.LayerNorm(self.hidden_size)
         self.ln2 = nn.LayerNorm(self.hidden_size)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        x = self.ln1(input)
-        q = self.query(x)
-        k = self.key(x)
-        v = self.value(x)
-        attn_output, _ = self.mha(q, k, v)
-        x = input + attn_output
+        x = input + self.attn(self.ln1(input))
         x = x + self.ffn(self.ln2(x))
         return x
 
