@@ -64,3 +64,24 @@ Notice the prominent `nccl:all_reduce` kernel during the backward pass. This sin
 The pattern is inverted. Notice the `nccl:all_gather` kernels firing just before the forward pass of each sharded block (to assemble the weights) and the `nccl:reduce_scatter` kernels interleaved within the backward pass (to shard gradients as they are computed). This is the signature of ZeRO-3 in action.
 
 <img src="assets/profiler_fsdp.png" alt="PyTorch Profiler Screenshot for FSDP" width="800" />
+
+---
+
+### 🔀 Phase 3 Progress - Tensor Parallelism + FSDP
+
+Phase 3 introduces **tensor parallelism (TP)** on top of the manual FSDP sharding used in Phase 2. A new Tensor Parallel runtime slices the model's linear and attention projections across a configurable set of ranks while FSDP maintains ZeRO-3 style state sharding.
+
+**Highlights**
+- Lightweight Megatron-style column/row sharded linear layers for attention and MLPs.
+- TP-aware self-attention that keeps heads local to each tensor-parallel rank.
+- Data loading automatically switches to data-parallel ranks (world size ÷ TP size) so each sample is still seen once per global step.
+
+**Usage**
+
+```bash
+torchrun --nproc_per_node=4 src/train.py \
+  --tensor_parallel_size 2 \
+  --mixed_precision
+```
+
+The command above launches 4 GPUs split into 2 tensor-parallel shards (each shard still benefits from FSDP). Set `--tensor_parallel_size 1` (default) to fall back to pure FSDP.
