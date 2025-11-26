@@ -75,6 +75,7 @@ Phase 3 introduces **tensor parallelism (TP)** on top of the manual FSDP shardin
 - Lightweight Megatron-style column/row sharded linear layers for attention and MLPs.
 - TP-aware self-attention that keeps heads local to each tensor-parallel rank.
 - Data loading automatically switches to data-parallel ranks (world size ÷ TP size) so each sample is still seen once per global step.
+- 8B parameter model trained successfully with TP=2 and FSDP.
 
 **Usage**
 
